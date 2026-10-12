@@ -1,0 +1,32 @@
+name: Upstream-Update als PR
+on:
+  schedule:
+    - cron: '0 3 * * 1'   # montags 03:00 UTC
+  workflow_dispatch:
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+      - name: Upstream holen und PR öffnen
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/googleanalytics/google-analytics-mcp.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Keine neuen Änderungen"; exit 0
+          fi
+          # Upstream in einen eigenen Branch mergen, damit die OMF-Dateien erhalten bleiben
+          git checkout -B upstream-update
+          git merge --no-edit upstream/main
+          git push -f origin upstream-update
+          gh pr create --base main --head upstream-update \
+            --title "Upstream-Update $(date +%F)" \
+            --body "Neue Commits aus googleanalytics/google-analytics-mcp. Vor dem Merge prüfen: tools/client.py (_get_credentials), coordinator.py (tools), pyproject.toml (Abhängigkeiten)." \
+            || echo "PR ist bereits offen"
