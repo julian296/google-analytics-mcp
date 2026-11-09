@@ -3,30 +3,81 @@ on:
   schedule:
     - cron: '0 3 * * 1'   # montags 03:00 UTC
   workflow_dispatch:
+permissions:
+  contents: read          # Push und PR laufen über SYNC_TOKEN, nicht GITHUB_TOKEN
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN }}
-      - name: Upstream holen und PR öffnen
-        env:
-          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.12'
+
+      - name: Upstream mergen
+        id: merge
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Für .gitattributes "merge=ours": OMF-Dateien (Dockerfile) bleiben erhalten
+          git config merge.ours.driver true
           git remote add upstream https://github.com/googleanalytics/google-analytics-mcp.git
           git fetch upstream main
           if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "Keine neuen Änderungen"; exit 0
+            echo "Keine neuen Änderungen"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          # Upstream in einen eigenen Branch mergen, damit die OMF-Dateien erhalten bleiben
           git checkout -B upstream-update
-          git merge --no-edit upstream/main
+          if ! git merge --no-edit upstream/main; then
+            echo "::error::Merge-Konflikt mit upstream in: $(git diff --name-only --diff-filter=U | tr '\n' ' ')– bitte manuell mergen."
+            git merge --abort
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Startprüfung OMF-Server
+        id: check
+        if: steps.merge.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GA4_MCP_OAUTH_CLIENT_ID: ci.apps.googleusercontent.com
+          GA4_MCP_OAUTH_CLIENT_SECRET: ci
+          GA4_MCP_BASE_URL: https://ci.invalid
+          GA4_MCP_JWT_SIGNING_KEY: ci-only-not-a-secret-ci-only-not-a-secret
+          GA4_MCP_STORAGE_PATH: ${{ runner.temp }}/omf-data
+        run: |
+          set -euo pipefail
+          # Gleiche FastMCP-Version wie im Dockerfile installieren
+          FASTMCP_SPEC=$(grep -o 'fastmcp[^"]*' Dockerfile | head -1)
+          pip install . "$FASTMCP_SPEC"
+          GA4_MCP_STORAGE_ENCRYPTION_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
+            python _omf_remote/server.py --check
+
+      - name: Branch pushen und PR öffnen
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          CHECK_RESULT: ${{ steps.check.outcome }}
+        run: |
+          set -euo pipefail
           git push -f origin upstream-update
+          if [ "$CHECK_RESULT" = "success" ]; then
+            STATUS="✅ Startprüfung des OMF-Servers erfolgreich (Installation, Schutzprüfungen, Tool-Registrierung)."
+          else
+            STATUS="❌ Startprüfung des OMF-Servers fehlgeschlagen – NICHT mergen, bevor _omf_remote/server.py bzw. Dockerfile angepasst sind (Log des Workflow-Laufs prüfen)."
+          fi
+          BODY="Neue Commits aus googleanalytics/google-analytics-mcp.
+
+          $STATUS
+
+          Vor dem Merge prüfen: analytics_mcp/tools/client.py (use_request_access_token), analytics_mcp/coordinator.py (read_only_tools), pyproject.toml (Abhängigkeiten, v. a. mcp-Version passend zu fastmcp im Dockerfile)."
           gh pr create --base main --head upstream-update \
-            --title "Upstream-Update $(date +%F)" \
-            --body "Neue Commits aus googleanalytics/google-analytics-mcp. Vor dem Merge prüfen: tools/client.py (_get_credentials), coordinator.py (tools), pyproject.toml (Abhängigkeiten)." \
-            || echo "PR ist bereits offen"
+            --title "Upstream-Update $(date +%F)" --body "$BODY" \
+            || gh pr comment upstream-update --body "Branch aktualisiert ($(date +%F)). $STATUS"
+          if [ "$CHECK_RESULT" != "success" ]; then exit 1; fi

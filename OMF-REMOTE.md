@@ -7,8 +7,10 @@ bleiben unverändert.
 | Datei | Zweck |
 | --- | --- |
 | `_omf_remote/server.py` | Einstiegspunkt: OAuth-Proxy, Tools aus upstream, Nutzer-Token statt Server-Konto |
-| `Dockerfile`, `.dockerignore` | Container für Coolify, Port 8080 |
-| `.github/workflows/upstream-update.yml` | Wöchentlicher PR mit Änderungen aus upstream |
+| `Dockerfile` | Container für Coolify, Port 8080 (ersetzt das Dockerfile von upstream) |
+| `.dockerignore` | Von upstream; OMF ergänzt nur die Freigabe von `_omf_remote/` |
+| `.gitattributes` | `Dockerfile merge=ours`: bei Upstream-Merges bleibt das OMF-Dockerfile erhalten |
+| `.github/workflows/upstream-update.yml` | Wöchentlicher PR mit Änderungen aus upstream inkl. Startprüfung (benötigt Repository-Secret `SYNC_TOKEN`) |
 
 Der Ordnername beginnt mit `_`, damit setuptools ihn beim `pip install .` nicht als
 zweites Paket erkennt.
@@ -29,7 +31,17 @@ Weiterleitungs-URI im OAuth-Client: `GA4_MCP_BASE_URL` + `/auth/callback`.
 
 ## Schutz bei Upstream-Updates
 
-Der Server startet absichtlich nicht, wenn upstream `analytics_mcp.tools.client._get_credentials`
-oder `analytics_mcp.coordinator.tools` umbaut. So kann ein Update nie still auf eine andere
-Anmeldung ausweichen. Schlägt ein Deploy nach einem Update-PR fehl, im Log nach
-„muss angepasst werden“ suchen.
+Der Server nutzt nur offizielle Upstream-Schnittstellen:
+
+- `analytics_mcp.coordinator.read_only_tools` – alle Lese-Tools (Schreib-Tools werden nie registriert)
+- `analytics_mcp.tools.client.use_request_access_token` – bindet das Google-Token der angemeldeten Person an jede Tool-Ausführung
+- `analytics_mcp.tools.client.set_require_request_credentials(True)` – ohne Token pro Anfrage gibt es einen Fehler statt eines Rückfalls auf ein Server-Konto (ADC)
+
+Der Server startet absichtlich nicht, wenn upstream eine dieser Stellen umbaut. So kann ein
+Update nie still auf eine andere Anmeldung ausweichen. Schlägt ein Deploy nach einem
+Update-PR fehl, im Log nach „muss angepasst werden“ suchen.
+
+`python _omf_remote/server.py --check` führt alle Importe und Prüfungen aus, ohne den
+Server zu starten. Der Upstream-Workflow nutzt das und schreibt das Ergebnis in den PR.
+
+FastMCP muss zur `mcp`-Version von upstream passen (upstream ≥ 1.0: `mcp>=2.3` → `fastmcp>=4.1`).

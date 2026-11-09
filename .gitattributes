@@ -1,0 +1,2 @@
+# OMF: eigenes Dockerfile bei Upstream-Merges immer behalten
+Dockerfile merge=ours
